@@ -1,0 +1,164 @@
+name: Supabase CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+
+      - name: Verify Deno version
+        run: deno --version
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Verify Supabase CLI version
+        run: supabase --version
+
+      - name: Start local Supabase (minimal services)
+        run: supabase start -x studio,imgproxy,inbucket
+
+      - name: Wait for Supabase to start
+        run: sleep 10
+
+      - name: Apply local migrations
+        run: supabase db push --local --include-all
+
+      - name: Verify Supabase is ready
+        run: |
+          echo "🔍 Checking Supabase status..."
+          supabase status
+
+      - name: Read keys from Supabase status
+        run: |
+          STATUS_JSON=$(supabase status -o json)
+          SUPABASE_URL=$(echo "$STATUS_JSON" | python3 -c "import json, sys; data = json.load(sys.stdin); print(data['API_URL'])")
+          SUPABASE_ANON_KEY=$(echo "$STATUS_JSON" | python3 -c "import json, sys; data = json.load(sys.stdin); print(data['ANON_KEY'])")
+          SUPABASE_SERVICE_ROLE_KEY=$(echo "$STATUS_JSON" | python3 -c "import json, sys; data = json.load(sys.stdin); print(data['SERVICE_ROLE_KEY'])")
+          JWT_SECRET=$(echo "$STATUS_JSON" | python3 -c "import json, sys; data = json.load(sys.stdin); print(data['JWT_SECRET'])")
+          echo "SUPABASE_URL=${SUPABASE_URL}" >> "$GITHUB_ENV"
+          echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}" >> "$GITHUB_ENV"
+          echo "SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}" >> "$GITHUB_ENV"
+          echo "JWT_SECRET=${JWT_SECRET}" >> "$GITHUB_ENV"
+
+      - name: Create .env file for edge functions
+        run: |
+          {
+            echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
+            echo "MOCK_STORE_APIS=true"
+            echo "SUPABASE_URL=${SUPABASE_URL}"
+            echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+            echo "SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}"
+            echo "JWT_SECRET=${JWT_SECRET}"
+            echo "INTERNAL_SECRET=test-internal-secret-ci"
+          } > supabase/functions/.env
+          echo "✅ Created supabase/functions/.env"
+
+      - name: Verify .env file was created
+        run: |
+          if [ -f supabase/functions/.env ]; then
+            echo "✅ supabase/functions/.env exists"
+            echo ""
+            echo "File contents (masked):"
+            cat supabase/functions/.env | sed 's/=.*/=***MASKED***/g'
+            echo ""
+            echo "Verifying actual values are not empty:"
+            GEMINI_KEY_LEN=$(grep GEMINI_API_KEY supabase/functions/.env | cut -d'=' -f2 | wc -c)
+            echo "  GEMINI_API_KEY: $GEMINI_KEY_LEN chars"
+            echo "  SUPABASE_URL: $(grep SUPABASE_URL supabase/functions/.env | cut -d'=' -f2 | wc -c) chars"
+            echo "  SUPABASE_ANON_KEY: $(grep SUPABASE_ANON_KEY supabase/functions/.env | cut -d'=' -f2 | wc -c) chars"
+            echo "  SUPABASE_SERVICE_ROLE_KEY: $(grep SUPABASE_SERVICE_ROLE_KEY supabase/functions/.env | cut -d'=' -f2 | wc -c) chars"
+            echo "  JWT_SECRET: $(grep JWT_SECRET supabase/functions/.env | cut -d'=' -f2 | wc -c) chars"
+            echo "  INTERNAL_SECRET: $(grep INTERNAL_SECRET supabase/functions/.env | cut -d'=' -f2 | wc -c) chars"
+            echo ""
+            # Warn if GEMINI_API_KEY is missing (but don't fail - it's optional for most tests)
+            if [ "$GEMINI_KEY_LEN" -le 1 ]; then
+              echo "⚠️  WARNING: GEMINI_API_KEY is empty or missing!"
+              echo "⚠️  text-improve tests will fail. Make sure the secret is set in GitHub."
+            fi
+          else
+            echo "❌ supabase/functions/.env does not exist!"
+            exit 1
+          fi
+
+      - name: Start Edge Functions
+        run: |
+          echo "🚀 Starting Edge Functions..."
+          supabase functions serve --env-file supabase/functions/.env --no-verify-jwt &
+          sleep 5
+          echo "✅ Edge Functions started (JWT verification disabled for CI)"
+
+      - name: Run tests
+        env:
+          TEST_DB_URL: postgres://postgres:postgres@127.0.0.1:54322/postgres
+          SUPPORT_LINK: https://example.com/support
+          SUPPORT_LINK_TITLE: Support
+          INTERNAL_SECRET: test-internal-secret-ci
+        run: deno test -A --fail-fast --no-lock --no-check
+
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+    
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Login to Supabase
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase login --token "$SUPABASE_ACCESS_TOKEN"
+
+      - name: Link project
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --yes
+
+      - name: Push migrations to remote
+        run: supabase db push --include-all --linked
+
+      - name: Ensure test user exists (optional)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          TEST_USER_EMAIL: tester@itsdone.local
+          TEST_USER_PASSWORD: Passw0rd!
+        run: deno run -A scripts/create_test_user.ts
+
+      - name: Seed profiles and business profile (dev)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+          TEST_USER_EMAIL: tester@itsdone.local
+          TEST_USER_FIRST_NAME: Alexander
+          TEST_USER_LAST_NAME: Tischer
+          BUSINESS_LOGO_FILE: scripts/assets/test_logo.b64
+        run: deno run -A scripts/seed_profiles_and_business.ts
+
+

@@ -1,0 +1,5 @@
+{
+  "tasks": {
+    "test:edge": "deno test -A supabase/tests/edge"
+  }
+}

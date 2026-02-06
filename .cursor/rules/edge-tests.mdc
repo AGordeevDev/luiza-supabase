@@ -1,0 +1,24 @@
+---
+description: Edge function test conventions (Supabase)
+globs: supabase/tests/edge/**/*.ts
+alwaysApply: false
+---
+
+# Edge Tests (Supabase)
+
+- Use `fetch` for all HTTP and admin calls; no SDKs.
+- Source test phones + OTPs from `supabase/config.toml` `[auth.sms.test_otp]`.
+- Always run `verification-start` before `verification-verify`.
+- Always clean users after each test (use `withUserCleanup`).
+- Prefer shared helpers from `supabase/tests/edge/_shared/test-utils.ts`.
+- When adding new environment variables, update `env.example` with a short explanation.
+
+Example:
+```ts
+const [entry] = await getTestPhoneEntries(1)
+await withUserCleanup([entry.phone], async () => {
+  await startVerification(entry.phone)
+  const verify = await verifyPhone(entry.phone, entry.otp)
+  assertEquals(verify.response.status, 200)
+})
+```

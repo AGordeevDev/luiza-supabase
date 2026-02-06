@@ -1,0 +1,7 @@
+{
+  "name": "luiza-supabase",
+  "private": true,
+  "scripts": {
+    "test:edge": "deno run -A scripts/run-edge-tests.ts"
+  }
+}
