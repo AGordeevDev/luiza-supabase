@@ -143,22 +143,18 @@ jobs:
       - name: Push migrations to remote
         run: supabase db push --include-all --linked
 
-      - name: Ensure test user exists (optional)
+
+      - name: Set function secrets
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-          TEST_USER_EMAIL: tester@itsdone.local
-          TEST_USER_PASSWORD: Passw0rd!
-        run: deno run -A scripts/create_test_user.ts
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          supabase secrets set GEMINI_API_KEY="$GEMINI_API_KEY" --project-ref "$SUPABASE_PROJECT_REF"
 
-      - name: Seed profiles and business profile (dev)
+      - name: Deploy all edge functions
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-          TEST_USER_EMAIL: tester@itsdone.local
-          TEST_USER_FIRST_NAME: Alexander
-          TEST_USER_LAST_NAME: Tischer
-          BUSINESS_LOGO_FILE: scripts/assets/test_logo.b64
-        run: deno run -A scripts/seed_profiles_and_business.ts
-
-
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          supabase functions deploy --project-ref "$SUPABASE_PROJECT_REF"
